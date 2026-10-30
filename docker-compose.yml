@@ -1,0 +1,299 @@
+services:
+
+  # ===============================
+  # BANCOS DE DADOS LOCAIS (4)
+  # ===============================
+
+  postgres-auth:
+    image: postgres:15-bookworm
+    container_name: togglemaster-postgres-auth
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${AUTH_POSTGRES_DB:-auth_db}
+      POSTGRES_USER: ${AUTH_POSTGRES_USER:-auth_user}
+      POSTGRES_PASSWORD: ${AUTH_POSTGRES_PASSWORD:-auth_pass_123!}
+    volumes:
+      - auth-pgdata:/var/lib/postgresql/data
+      - ./auth-service/db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AUTH_POSTGRES_USER:-auth_user} -d ${AUTH_POSTGRES_DB:-auth_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - togglemaster-net
+
+  postgres-flag:
+    image: postgres:15-bookworm
+    container_name: togglemaster-postgres-flag
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${FLAG_POSTGRES_DB:-flags_db}
+      POSTGRES_USER: ${FLAG_POSTGRES_USER:-flag_user}
+      POSTGRES_PASSWORD: ${FLAG_POSTGRES_PASSWORD:-flag_pass_123!}
+    volumes:
+      - flag-pgdata:/var/lib/postgresql/data
+      - ./flag-service/db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${FLAG_POSTGRES_USER:-flag_user} -d ${FLAG_POSTGRES_DB:-flags_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - togglemaster-net
+
+  postgres-targeting:
+    image: postgres:15-bookworm
+    container_name: togglemaster-postgres-targeting
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${TARGETING_POSTGRES_DB:-targeting_db}
+      POSTGRES_USER: ${TARGETING_POSTGRES_USER:-targeting_user}
+      POSTGRES_PASSWORD: ${TARGETING_POSTGRES_PASSWORD:-targeting_pass_123!}
+    volumes:
+      - targeting-pgdata:/var/lib/postgresql/data
+      - ./targeting-service/db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TARGETING_POSTGRES_USER:-targeting_user} -d ${TARGETING_POSTGRES_DB:-targeting_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - togglemaster-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: togglemaster-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - togglemaster-net
+
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    container_name: togglemaster-dynamodb-local
+    restart: unless-stopped
+    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath /home/dynamodblocal/data"
+    volumes:
+      - dynamodb-data:/home/dynamodblocal/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8000
+          && echo TCP_OK
+          && exec 3>&-
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - togglemaster-net
+
+  localstack-sqs:
+    image: localstack/localstack:3.0
+    container_name: togglemaster-localstack-sqs
+    restart: unless-stopped
+    environment:
+      SERVICES: sqs
+      DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-fakeLocalKey}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-fakeLocalSecret}
+      EDGE_PORT: 4566
+      EAGER_SERVICE_LOADING: 1
+    volumes:
+      - localstack-data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "4566:4566"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+    networks:
+      - togglemaster-net
+
+  # ===============================
+  # SETUP INICIAL (cria recursos AWS locais)
+  # ===============================
+
+  setup-aws-local:
+    image: amazon/aws-cli:2.15.0
+    container_name: togglemaster-setup-aws-local
+    depends_on:
+      localstack-sqs:
+        condition: service_healthy
+      dynamodb-local:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-fakeLocalKey}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-fakeLocalSecret}
+      AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "Criando fila SQS no LocalStack..."
+        aws --endpoint-url=http://localstack-sqs:4566 sqs create-queue \
+          --queue-name toggle-master-events \
+          --region $$AWS_DEFAULT_REGION || echo "Fila SQS já existe, seguindo..."
+
+        echo "Criando tabela DynamoDB local..."
+        aws --endpoint-url=http://dynamodb-local:8000 dynamodb create-table \
+          --table-name ToggleMasterAnalytics \
+          --attribute-definitions AttributeName=event_id,AttributeType=S \
+          --key-schema AttributeName=event_id,KeyType=HASH \
+          --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5 \
+          --region $$AWS_DEFAULT_REGION || echo "Tabela DynamoDB já existe, seguindo..."
+
+        echo "✅ Setup AWS local finalizado com sucesso!"
+    networks:
+      - togglemaster-net
+
+  # ===============================
+  # APLICAÇÕES (5)
+  # ===============================
+
+  auth-service:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    container_name: togglemaster-auth-service
+    restart: unless-stopped
+    depends_on:
+      postgres-auth:
+        condition: service_healthy
+    environment:
+      PORT: 8001
+      DATABASE_URL: postgres://${AUTH_POSTGRES_USER:-auth_user}:${AUTH_POSTGRES_PASSWORD:-auth_pass_123!}@postgres-auth:5432/${AUTH_POSTGRES_DB:-auth_db}
+      MASTER_KEY: ${MASTER_KEY:-SUA_MASTER_KEY}
+    ports:
+      - "8001:8001"
+    networks:
+      - togglemaster-net
+
+  flag-service:
+    build:
+      context: ./flag-service
+      dockerfile: Dockerfile
+    container_name: togglemaster-flag-service
+    restart: unless-stopped
+    depends_on:
+      postgres-flag:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    environment:
+      PORT: 8002
+      DATABASE_URL: postgres://${FLAG_POSTGRES_USER:-flag_user}:${FLAG_POSTGRES_PASSWORD:-flag_pass_123!}@postgres-flag:5432/${FLAG_POSTGRES_DB:-flags_db}
+      AUTH_SERVICE_URL: http://auth-service:8001
+    ports:
+      - "8002:8002"
+    networks:
+      - togglemaster-net
+
+  targeting-service:
+    build:
+      context: ./targeting-service
+      dockerfile: Dockerfile
+    container_name: togglemaster-targeting-service
+    restart: unless-stopped
+    depends_on:
+      postgres-targeting:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    environment:
+      PORT: 8003
+      DATABASE_URL: postgres://${TARGETING_POSTGRES_USER:-targeting_user}:${TARGETING_POSTGRES_PASSWORD:-targeting_pass_123!}@postgres-targeting:5432/${TARGETING_POSTGRES_DB:-targeting_db}
+      AUTH_SERVICE_URL: http://auth-service:8001
+    ports:
+      - "8003:8003"
+    networks:
+      - togglemaster-net
+
+  evaluation-service:
+    build:
+      context: ./evaluation-service
+      dockerfile: Dockerfile
+    container_name: togglemaster-evaluation-service
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      setup-aws-local:
+        condition: service_completed_successfully
+      flag-service:
+        condition: service_started
+      targeting-service:
+        condition: service_started
+    environment:
+      PORT: 8004
+      REDIS_URL: redis://redis:6379
+      FLAG_SERVICE_URL: http://flag-service:8002
+      TARGETING_SERVICE_URL: http://targeting-service:8003
+      AWS_SQS_URL: http://localstack-sqs:4566/000000000000/toggle-master-events
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-fakeLocalKey}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-fakeLocalSecret}
+      AWS_ENDPOINT_URL_SQS: http://localstack-sqs:4566
+      SERVICE_API_KEY: ${SERVICE_API_KEY:-preencher-apos-criar-no-auth}
+    ports:
+      - "8004:8004"
+    networks:
+      - togglemaster-net
+
+  analytics-service:
+    build:
+      context: ./analytics-service
+      dockerfile: Dockerfile
+    container_name: togglemaster-analytics-service
+    restart: unless-stopped
+    depends_on:
+      setup-aws-local:
+        condition: service_completed_successfully
+      evaluation-service:
+        condition: service_started
+    environment:
+      PORT: 8005
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_SQS_URL: http://localstack-sqs:4566/000000000000/toggle-master-events
+      AWS_DYNAMODB_TABLE: ToggleMasterAnalytics
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-fakeLocalKey}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-fakeLocalSecret}
+      AWS_ENDPOINT_URL_DYNAMODB: http://dynamodb-local:8000
+      AWS_ENDPOINT_URL_SQS: http://localstack-sqs:4566
+    ports:
+      - "8005:8005"
+    networks:
+      - togglemaster-net
+
+volumes:
+  auth-pgdata:
+  flag-pgdata:
+  targeting-pgdata:
+  redis-data:
+  dynamodb-data:
+  localstack-data:
+
+networks:
+  togglemaster-net:
+    driver: bridge

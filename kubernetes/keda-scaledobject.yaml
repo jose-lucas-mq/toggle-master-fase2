@@ -1,0 +1,76 @@
+# =============================================================================
+# KEDA — Autoscaling orientado a eventos do analytics-service
+# -----------------------------------------------------------------------------
+# O analytics-service não recebe tráfego HTTP: ele consome a fila SQS
+# (toggle-master-events) e grava no DynamoDB. Escalar por CPU não faz sentido —
+# o correto é escalar pela PROFUNDIDADE DA FILA (queue depth), inclusive de 0.
+#
+# Componentes:
+#   1. TriggerAuthentication — diz ao KEDA para autenticar na AWS via IRSA
+#      (assume a role keda-operator-role através do OIDC do cluster; sem secrets).
+#   2. ScaledObject          — observa a fila SQS e ajusta as réplicas do
+#      Deployment analytics-service (min=0, max=10, queueLength=10).
+#
+# Os placeholders {{...}} são substituídos por kubernetes/apply.sh com os
+# valores do `terraform output`.
+#
+# PRE-REQUISITO: KEDA instalado no cluster (kubernetes/install-keda.sh).
+#
+# Sprint 3 — T3.3
+# =============================================================================
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: keda-aws-sqs-auth
+  namespace: apps
+  labels:
+    project: toggle-master
+spec:
+  # Autenticação sem secrets: KEDA assume a role IAM via IRSA (OIDC do EKS).
+  # identityOwner=keda → usa a role IRSA anotada na SA `keda-operator`
+  # (namespace keda), criada pelo Terraform (keda-operator-role).
+  # NOTA: `roleArn` e `identityOwner` são mutuamente exclusivos no KEDA —
+  # como já anotamos a SA do operador, basta identityOwner: keda.
+  podIdentity:
+    provider: aws
+    identityOwner: keda
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: analytics-scaledobject
+  namespace: apps
+  labels:
+    app: analytics-service
+    project: toggle-master
+spec:
+  scaleTargetRef:
+    name: analytics-service
+  # Pode chegar a 0 réplicas quando a fila está vazia (custo zero parado)
+  minReplicaCount: 0
+  maxReplicaCount: 10
+  # Intervalo de checagem da fila (segundos) — agressivo de propósito p/ demo
+  pollingInterval: 15
+  # Tempo (segundos) que o KEDA espera após a última mensagem antes de ir a 0
+  cooldownPeriod: 60
+  triggers:
+    - type: aws-sqs-queue
+      authenticationRef:
+        name: keda-aws-sqs-auth
+      metadata:
+        queueURL: "{{SQS_EVENTS_URL}}"
+        awsRegion: "us-east-1"
+        # Escala +1 réplica a cada 10 mensagens na fila
+        queueLength: "10"
+        # true (padrão) = conta também as mensagens "em voo"
+        # (ApproximateNumberOfMessages + ...NotVisible)
+        scaleOnInFlight: "true"
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 60
+          policies:
+            - type: Percent
+              value: 50
+              periodSeconds: 60

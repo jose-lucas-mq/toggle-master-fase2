@@ -1,0 +1,79 @@
+# ============================================================
+# Modelo de variáveis do Terraform - ToggleMaster
+# ============================================================
+# COMO USAR:
+#   1. Copie este arquivo para "terraform.tfvars" (na mesma pasta).
+#   2. Preencha apenas as variáveis que você quer sobrescrever (os defaults
+#      em variables.tf já são otimizados para estudo).
+#   3. NÃO COMMITE "terraform.tfvars" no git (contém ARN de role, etc).
+#      (.gitignore já deveria ignorar)
+# ============================================================
+
+# ---------- AUTENTICAÇÃO AWS LOCAL (OBRIGATÓRIO CONFIGURAR 1 FORMA) ----------
+# Escolha UMA das 2 estratégias abaixo (não precisa configurar as 2):
+#
+# ESTRATÉGIA 1 (Recomendada): Profile AWS CLI com role no ~/.aws/config
+#   Descomente a linha abaixo e coloque o nome do profile que você criou em
+#   ~/.aws/config (com role_arn, source_profile, etc).
+# aws_profile = "fiap-toggle-master"
+
+# ESTRATÉGIA 2: Assume role DIRETO pelo provider (não precisa editar ~/.aws/*).
+#   Você ainda precisa ter credenciais base (env vars ou default profile) com
+#   permissão sts:AssumeRole na role abaixo. Basta descomentar e colar a ARN.
+# aws_assume_role_arn = "arn:aws:iam::123456789012:role/ToggleMasterDeployRole"
+# aws_assume_role_session_name = "terraform-toggle-master-local"
+
+# ---------- REGIÃO ----------
+aws_region = "us-east-1"
+
+# ---------- TAGS PADRÃO ----------
+common_tags = {
+  Environment = "dev"
+  Team        = "fiap-toggle-master-team"
+  Owner       = "tech-challenge-fase2"
+  CostCenter  = "fiap-pos-tech"
+}
+
+# ---------- NETWORKING ----------
+# VPC /16 dedicada ao ToggleMaster (3 AZs)
+vpc_cidr = "10.20.0.0/16"
+
+# 3 sub-redes PÚBLICAS (NAT Gateways, ALB Ingress Nginx) — 4096 IPs cada (/20)
+public_subnet_cidrs = ["10.20.0.0/20", "10.20.16.0/20", "10.20.32.0/20"]
+
+# 3 sub-redes PRIVADAS (RDS, Redis, Nós EKS, workloads) — 4096 IPs cada (/20)
+private_subnet_cidrs = ["10.20.48.0/20", "10.20.64.0/20", "10.20.80.0/20"]
+
+# AZs (certifique-se que existem na sua conta: AWS CLI: `aws ec2 describe-availability-zones`)
+azs = ["us-east-1a", "us-east-1b", "us-east-1c"]
+
+# Economia $: 1 NAT Gateway (estudo) ao invés de 1 por AZ (HA).
+single_nat_gateway = true
+
+# ---------- RDS (PostgreSQL) ----------
+# Free tier elegível (12 meses contas novas): db.t3.micro Single-AZ 20GB gp3.
+rds_engine_version        = "15.4"
+rds_instance_class        = "db.t3.micro"
+rds_storage_gb            = 20
+rds_storage_max_gb        = 100
+rds_multi_az              = false      # false = $$$ economia estudo
+rds_backup_retention_days = 7
+
+# ---------- ELASTICACHE REDIS ----------
+# Free tier: cache.t4g.micro (Graviton) ou cache.t3.micro (x86).
+redis_node_type      = "cache.t4g.micro"
+redis_engine_version = "7.0"
+
+# ---------- DYNAMODB ----------
+# PAY_PER_REQUEST = paga por uso (custo ~zero em estudo). Crie GSIs recomendados.
+dynamodb_billing_mode = "PAY_PER_REQUEST"
+dynamodb_create_gsis  = true
+dynamodb_ttl_enabled  = false
+
+# ---------- SQS ----------
+# Standard Queue. DLQ habilitada (poison pills).
+sqs_visibility_timeout_seconds = 300     # 5min (worker analytics batch)
+sqs_message_retention_seconds  = 345600  # 4 dias
+sqs_long_polling_wait_seconds  = 20
+sqs_create_dlq                 = true
+sqs_dlq_max_receive_count      = 5

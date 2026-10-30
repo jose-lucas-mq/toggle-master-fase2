@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: targeting-service
+  namespace: apps
+  labels:
+    app: targeting-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: targeting-service
+  template:
+    metadata:
+      labels:
+        app: targeting-service
+    spec:
+      containers:
+        - name: targeting-service
+          image: "{{TARGETING_ECR_URL}}:latest"
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8003
+          env:
+            - name: PORT
+              value: "8003"
+            - name: TARGETING_RDS_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: togglemaster-config
+                  key: TARGETING_RDS_USER
+            - name: TARGETING_RDS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: togglemaster-secrets
+                  key: TARGETING_RDS_PASSWORD
+            - name: TARGETING_RDS_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: togglemaster-config
+                  key: TARGETING_RDS_ENDPOINT
+            - name: TARGETING_DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: togglemaster-config
+                  key: TARGETING_DB_NAME
+            - name: DATABASE_URL
+              value: "postgres://$(TARGETING_RDS_USER):$(TARGETING_RDS_PASSWORD)@$(TARGETING_RDS_ENDPOINT)/$(TARGETING_DB_NAME)"
+            - name: AUTH_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: togglemaster-config
+                  key: AUTH_SERVICE_URL
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8003
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8003
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: targeting-service
+  namespace: apps
+spec:
+  type: ClusterIP
+  selector:
+    app: targeting-service
+  ports:
+    - port: 8003
+      targetPort: 8003
+      protocol: TCP

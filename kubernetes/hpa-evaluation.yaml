@@ -1,0 +1,52 @@
+# =============================================================================
+# HPA (Horizontal Pod Autoscaler) do evaluation-service
+# -----------------------------------------------------------------------------
+# Escala o evaluation-service com base em CPU (target 70% do request).
+# O evaluation-service tem requests.cpu=100m e limits.cpu=1000m, ou seja,
+# 70% do request = 70m. Sob carga HTTP o CPU sobe rápido e o HPA reage.
+#
+# PRE-REQUISITO: Metrics Server instalado no cluster (kubectl top pods -n apps).
+#
+# Sprint 3 — T3.2
+# =============================================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: evaluation-hpa
+  namespace: apps
+  labels:
+    app: evaluation-service
+    project: toggle-master
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: evaluation-service
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    # Sobe rápido: dobra as réplicas a cada 30s (até o max)
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+      selectPolicy: Max
+    # Desce devagar: evita flapping, aguarda 60s de métrica estável
+    scaleDown:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60

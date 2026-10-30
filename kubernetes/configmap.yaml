@@ -1,0 +1,38 @@
+# ConfigMap com URLs e configurações NÃO sensíveis dos microsserviços.
+# Os placeholders {{...}} são substituídos pelo script kubernetes/apply.sh
+# usando os outputs do Terraform (terraform output).
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: togglemaster-config
+  namespace: apps
+data:
+  AWS_REGION: "us-east-1"
+
+  # --- URLs internas do cluster (DNS do Kubernetes) ---
+  AUTH_SERVICE_URL: "http://auth-service:8001"
+  FLAG_SERVICE_URL: "http://flag-service:8002"
+  TARGETING_SERVICE_URL: "http://targeting-service:8003"
+
+  # --- RDS endpoints (outputs terraform) ---
+  AUTH_RDS_ENDPOINT: "{{AUTH_RDS_ENDPOINT}}"
+  FLAGS_RDS_ENDPOINT: "{{FLAGS_RDS_ENDPOINT}}"
+  TARGETING_RDS_ENDPOINT: "{{TARGETING_RDS_ENDPOINT}}"
+
+  # Usernames dos bancos (não sensíveis - as senhas ficam no Secret)
+  AUTH_RDS_USER: "auth_user"
+  FLAGS_RDS_USER: "flag_user"
+  TARGETING_RDS_USER: "targeting_user"
+
+  # Nomes dos bancos
+  AUTH_DB_NAME: "auth_db"
+  FLAGS_DB_NAME: "flags_db"
+  TARGETING_DB_NAME: "targeting_db"
+
+  # --- Redis ElastiCache (outputs terraform) ---
+  REDIS_URL: "redis://{{REDIS_ENDPOINT_ADDRESS}}:{{REDIS_PORT}}"
+
+  # --- SQS + DynamoDB (outputs terraform) ---
+  AWS_SQS_URL: "{{SQS_EVENTS_URL}}"
+  AWS_DYNAMODB_TABLE: "ToggleMasterAnalytics"

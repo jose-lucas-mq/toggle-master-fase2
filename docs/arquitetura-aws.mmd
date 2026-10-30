@@ -1,0 +1,195 @@
+%% =============================================================================
+%% ToggleMaster Tech Challenge FIAP — Sprint 2
+%% Diagrama de Arquitetura AWS + Comunicação dos Microsserviços
+%% Formato: Mermaid (flowchart)
+%% Importar no draw.io: Arrange → Insert → Advanced → Mermaid → colar este texto
+%% =============================================================================
+
+flowchart TD
+    %% =========================================================================
+    %% INTERNET
+    %% =========================================================================
+    Internet([ Internet\Usuários])
+
+    %% =========================================================================
+    %% ZONA PÚBLICA AWS (Route53 / ELB)
+    %% =========================================================================
+    subgraph AWS_PUBLIC["AWS — Zona Pública"]
+        ELB[" Load Balancer (NLB/ELB)\nIngress Nginx Controller"]
+    end
+
+    Internet -->|HTTP/HTTPS| ELB
+
+    %% =========================================================================
+    %% VPC
+    %% =========================================================================
+    subgraph VPC[" VPC toggle-master (10.0.0.0/16) — 3 AZs"]
+
+        %% ---------- Sub-redes Públicas ----------
+        subgraph PUBLIC_SUBNETS[" Sub-redes Públicas (3 AZs)"]
+            NAT[" NAT Gateway\nsaída p/ internet dos pods privados"]
+            IGW[" Internet Gateway"]
+            EKS_EP[" EKS Control Plane Endpoint\n(public + private)"]
+        end
+
+        %% ---------- Sub-redes Privadas ----------
+        subgraph PRIVATE_SUBNETS[" Sub-redes Privadas (3 AZs)"]
+
+            %% ===== EKS CLUSTER =====
+            subgraph EKS[" EKS Cluster toggle-master-eks (k8s 1.29)"]
+                direction TB
+                CP[" Control Plane (gerenciado AWS)\nAPI Server • etcd • scheduler"]
+                OIDC[" OIDC Provider\n(assina tokens IRSA)"]
+
+                subgraph NODES["Worker Nodes (MNG t3.small · Min2/Max4)"]
+                    NODE1[" Node 1 (EC2)"]
+                    NODE2[" Node 2 (EC2)"]
+                end
+
+                CP --- OIDC
+                CP --- NODES
+            end
+
+            %% ===== Namespace: ingress-nginx =====
+            subgraph NS_INGRESS[" Namespace: ingress-nginx"]
+                INGRESS["Nginx Ingress Controller\n(recebe do LB)"]
+            end
+
+            %% ===== Namespace: apps =====
+            subgraph NS_APPS[" Namespace: apps"]
+
+                AUTH[" auth-service (Go :8001)\nRegistra usuário · login · JWT"]
+                FLAG[" flag-service (Python :8002)\nCRUD flags"]
+                TARGETING[" targeting-service (Python :8003)\nCRUD regras de targeting"]
+                EVAL[" evaluation-service (Go :8004)\nAvalia flag p/ usuário"]
+                ANALYTICS[" analytics-service (Python :8005)\nConsome eventos · grava DynamoDB"]
+
+                %% IRSA ServiceAccounts
+                SA_EVAL["SA: evaluation-sa"]
+                SA_ANALYTICS["SA: analytics-sa"]
+            end
+
+            %% ===== Banco de Dados =====
+            subgraph RDS_GRP[" RDS PostgreSQL (db.t3.micro)"]
+                RDS_AUTH["auth_db\n(toggle-master-auth)"]
+                RDS_FLAGS["flags_db\n(toggle-master-flags)"]
+                RDS_TARGET["targeting_db\n(toggle-master-targeting)"]
+            end
+
+            %% ===== Cache =====
+            REDIS[" Redis ElastiCache\n(toggle-master-redis)"]
+
+            %% ===== Fila =====
+            subgraph SQS_GRP[" Amazon SQS"]
+                SQS["toggle-master-events\n(fila de eventos)"]
+                DLQ["toggle-master-events-dlq"]
+            end
+
+        end
+
+        %% ===== Serviços Gerenciados fora de sub-rede =====
+        DYNAMO[" DynamoDB\nToggleMasterAnalytics"]
+    end
+
+    %% =========================================================================
+    %% ECR (fora da VPC, serviço gerenciado)
+    %% =========================================================================
+    subgraph ECR_GRP[" Amazon ECR (5 repositórios privados)"]
+        ECR_AUTH["auth-service:latest"]
+        ECR_FLAG["flag-service:latest"]
+        ECR_TARGET["targeting-service:latest"]
+        ECR_EVAL["evaluation-service:latest"]
+        ECR_ANALYTICS["analytics-service:latest"]
+    end
+
+    %% =========================================================================
+    %% IAM / IRSA
+    %% =========================================================================
+    subgraph IAM_GRP[" IAM Roles IRSA (assumidas pelos pods)"]
+        ROLE_EVAL["Role: evaluation-pod\nSQS: SendMessage"]
+        ROLE_ANALYTICS["Role: analytics-pod\nSQS: Receive/Delete · DynamoDB: PutItem"]
+    end
+
+    %% =========================================================================
+    %% FLUXO: Internet → Ingress → Serviços de borda
+    %% =========================================================================
+    ELB -->|HTTP| INGRESS
+    INGRESS -->|/auth/*| AUTH
+    INGRESS -->|/flags/*| FLAG
+    INGRESS -->|/rules/*| TARGETING
+    INGRESS -->|/evaluate/*| EVAL
+    ANALYTICS ~~~|NÃO exposto| INGRESS
+
+    %% =========================================================================
+    %% FLUXO: Chamadas internas entre serviços
+    %% =========================================================================
+    FLAG -.->|valida Bearer JWT| AUTH
+    TARGETING -.->|valida Bearer JWT| AUTH
+    EVAL -->|GET /flags/:key| FLAG
+    EVAL -->|GET /rules/:key| TARGETING
+
+    %% =========================================================================
+    %% FLUXO: Serviços → Bancos de dados
+    %% =========================================================================
+    AUTH -->|SQL| RDS_AUTH
+    FLAG -->|SQL| RDS_FLAGS
+    TARGETING -->|SQL| RDS_TARGET
+
+    %% =========================================================================
+    %% FLUXO: evaluation → Redis (cache hot path)
+    %% =========================================================================
+    EVAL -->|GET/SET cache| REDIS
+
+    %% =========================================================================
+    %% FLUXO: evaluation → SQS → analytics → DynamoDB (eventos async)
+    %% =========================================================================
+    EVAL -->|SendMessage via IRSA| SQS
+    SQS -.->|maxReceiveCount| DLQ
+    ANALYTICS -->|ReceiveMessage/Delete via IRSA| SQS
+    ANALYTICS -->|PutItem/BatchWriteItem via IRSA| DYNAMO
+
+    %% =========================================================================
+    %% IRSA: ServiceAccounts → OIDC → IAM Roles
+    %% =========================================================================
+    SA_EVAL -.->|assume role| OIDC
+    SA_ANALYTICS -.->|assume role| OIDC
+    OIDC -.->|sts:AssumeRoleWithWebIdentity| ROLE_EVAL
+    OIDC -.->|sts:AssumeRoleWithWebIdentity| ROLE_ANALYTICS
+
+    %% =========================================================================
+    %% ECR: imagens pulladas pelos nodes
+    %% =========================================================================
+    ECR_AUTH -->|imagePull| NODE1
+    ECR_FLAG -->|imagePull| NODE1
+    ECR_TARGET -->|imagePull| NODE2
+    ECR_EVAL -->|imagePull| NODE2
+    ECR_ANALYTICS -->|imagePull| NODE2
+
+    %% =========================================================================
+    %% Saída para internet dos pods privados (NAT)
+    %% =========================================================================
+    NODES -->|saída p/ internet| NAT
+    NAT --> IGW
+
+    %% =========================================================================
+    %% Estilos
+    %% =========================================================================
+    classDef public fill:#dbeafe,stroke:#2563eb,stroke-width:1px
+    classDef private fill:#1f2937,stroke:#6b7280,stroke-width:1px,color:#fff
+    classDef eks fill:#059669,stroke:#047857,color:#fff
+    classDef svc fill:#fef3c7,stroke:#d97706
+    classDef db fill:#fed7aa,stroke:#ea580c
+    classDef queue fill:#ddd6fe,stroke:#7c3aed
+    classDef iam fill:#fce7f3,stroke:#db2777
+    classDef ecr fill:#bae6fd,stroke:#0284c7
+    classDef redis fill:#fecaca,stroke:#dc2626
+    classDef dynamo fill:#fed7aa,stroke:#ea580c
+
+    class ELB,IGW,NAT,EKS_EP public
+    class RDS_AUTH,RDS_FLAGS,RDS_TARGET db
+    class SQS,DLQ queue
+    class ROLE_EVAL,ROLE_ANALYTICS iam
+    class ECR_AUTH,ECR_FLAG,ECR_TARGET,ECR_EVAL,ECR_ANALYTICS ecr
+    class REDIS redis
+    class DYNAMO dynamo
+    class AUTH,FLAG,TARGETING,EVAL,ANALYTICS svc

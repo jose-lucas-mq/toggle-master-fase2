@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+  namespace: apps
+  labels:
+    app: auth-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth-service
+  template:
+    metadata:
+      labels:
+        app: auth-service
+    spec:
+      containers:
+        - name: auth-service
+          image: "{{AUTH_ECR_URL}}:latest"
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8001
+          env:
+            - name: PORT
+              value: "8001"
+            - name: AUTH_RDS_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: togglemaster-config
+                  key: AUTH_RDS_USER
+            - name: AUTH_RDS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: togglemaster-secrets
+                  key: AUTH_RDS_PASSWORD
+            - name: AUTH_RDS_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: togglemaster-config
+                  key: AUTH_RDS_ENDPOINT
+            - name: AUTH_DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: togglemaster-config
+                  key: AUTH_DB_NAME
+            - name: DATABASE_URL
+              value: "postgres://$(AUTH_RDS_USER):$(AUTH_RDS_PASSWORD)@$(AUTH_RDS_ENDPOINT)/$(AUTH_DB_NAME)"
+            - name: MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: togglemaster-secrets
+                  key: MASTER_KEY
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-service
+  namespace: apps
+spec:
+  type: ClusterIP
+  selector:
+    app: auth-service
+  ports:
+    - port: 8001
+      targetPort: 8001
+      protocol: TCP
